@@ -2,6 +2,12 @@
 
 A comparative benchmarking framework and dual-engine inference pipeline for traffic video computer vision, written in **Python** and **Rust**. Both pipelines ingest video files or live RTSP camera feeds, pre-process frames, query NVIDIA Triton Inference Server via **HTTP** or **gRPC**, render detections, publish telemetry to MQTT, and evaluate system performance across identical workloads.
 
+<img width="1072" height="680" alt="intersection traffic" src="https://github.com/user-attachments/assets/df2fc109-290f-47cf-803d-1b8e65966a75" />
+
+<img width="1072" height="680" alt="Screenshot 2026-11-15 at 3 59 08 PM" src="https://github.com/user-attachments/assets/f565050a-a928-4380-bca5-c76006b00230" />
+
+
+
 ---
 
 ## Architecture Overview
