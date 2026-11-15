@@ -86,6 +86,9 @@ python python/src/main.py [OPTIONS]
   - `nano`: Ultra-fast (~40ms latency) for high-FPS edge scenarios.
 - `--sync`: Run in blocking synchronous mode instead of smooth native 30 FPS async playback
 - `--no-track`: Disable buffered keyframe interpolation (display static keyframe detections)
+- `--device`: Target execution device: `auto`, `gpu`, `cuda`, `mps`, or `cpu` (default: `auto`)
+- `--gpu`: Enable/force GPU processing (routes local inference to CUDA/MPS and verifies remote Triton GPU execution)
+- `--cpu`: Force CPU-only execution (disables GPU acceleration locally and targets remote CPU instances)
 - `--conf`: Confidence score threshold for detections (default: `0.15`)
 - `--imgsz`: Input image resolution for local detector (default: `1024`, preserves detail on 1080p aerial traffic)
 - `--no-enhance`: Disable night-time CLAHE contrast enhancement
@@ -118,30 +121,24 @@ python python/src/main.py --source video/intersection-night.mp4 --model-size nan
 python python/src/main.py --source video/intersection-night.mp4 --no-track
 ```
 
-### 3. Remote Triton Server (HTTP or gRPC)
+### 3. Remote GPU vs. CPU Inference (Triton Server)
 ```bash
-# Using gRPC against local Triton
-python python/src/main.py --source video/intersection-night.mp4 --protocol grpc
+# Query remote Triton GPU server via gRPC
+python python/src/main.py --source video/intersection-night.mp4 --protocol grpc --server 192.168.1.80:8001 --gpu
 
-# Using HTTP against remote Triton host
-python python/src/main.py --source video/intersection-night.mp4 --protocol http --server 192.168.1.80:8000
+# Query remote Triton GPU server via HTTP
+python python/src/main.py --source video/intersection-night.mp4 --protocol http --server 192.168.1.80:8000 --gpu
+
+# Query remote Triton CPU server
+python python/src/main.py --source video/intersection-night.mp4 --protocol grpc --server 192.168.1.80:8001 --cpu
 ```
 
-### 4. Synchronous Per-Frame Latency Benchmark
+### 4. Live RTSP Camera Ingestion
 ```bash
-python python/src/main.py \
-  --source video/intersection-night.mp4 \
-  --headless \
-  --max-frames 200 \
-  --metrics-out benchmarks/results/python_benchmark.json
+python python/src/main.py --source "rtsp://wowza01.bellevuewa.gov:1935/live/CCTV001.stream" --protocol grpc --gpu
 ```
 
-### 2. Live RTSP Camera Ingestion
-```bash
-python python/src/main.py --source "rtsp://wowza01.bellevuewa.gov:1935/live/CCTV001.stream" --protocol grpc
-```
-
-### 3. Headless Benchmark Run with Metrics Output
+### 5. Headless Benchmark Run with Metrics Output
 ```bash
 python python/src/main.py \
   --source video/intersection-night.mp4 \

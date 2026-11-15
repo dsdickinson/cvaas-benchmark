@@ -143,34 +143,37 @@ cd ..
 ## Running the Inference Engines
 
 ### Python Inference Engine
-The Python engine supports both remote Triton server execution (HTTP/gRPC) and real-time local model detection with night-time CLAHE contrast enhancement and buffered 30 FPS keyframe interpolation.
+The Python engine supports both remote Triton server execution (HTTP/gRPC) and real-time local model detection with night-time CLAHE contrast enhancement and buffered 30 FPS keyframe interpolation. GPU processing is fully optional across both local and remote modes:
 
 ```bash
-# 1. Smooth 30 FPS Playback with Balanced Model (yolov8s, ~70ms, zero trailing)
+# 1. Smooth 30 FPS Playback (Auto-detects GPU if available, else CPU)
 .venv/bin/python python/src/main.py --source video/intersection-night.mp4
 
-# 2. Maximum Recall Mode (yolov8m, highest detection count for distant traffic)
-.venv/bin/python python/src/main.py --source video/intersection-night.mp4 --model-size medium
+# 2. Local GPU Acceleration (Forces CUDA or Apple Silicon MPS)
+.venv/bin/python python/src/main.py --source video/intersection-night.mp4 --gpu
 
-# 3. Static Keyframe Mode (raw detections without interpolation)
-.venv/bin/python python/src/main.py --source video/intersection-night.mp4 --no-track
+# 3. Local CPU-Only Execution (Disables GPU)
+.venv/bin/python python/src/main.py --source video/intersection-night.mp4 --cpu
 
-# 4. Synchronous Per-Frame Latency Benchmark (Headless)
-.venv/bin/python python/src/main.py --source video/intersection-night.mp4 --headless --max-frames 100
+# 4. Remote GPU Triton Inference Server (NVIDIA GPU / Jetson Orin via gRPC)
+.venv/bin/python python/src/main.py --source video/intersection-night.mp4 --protocol grpc --server 192.168.1.80:8001 --gpu
 
-# 5. Remote Triton Inference Server (gRPC or HTTP)
-.venv/bin/python python/src/main.py --source video/intersection-night.mp4 --protocol grpc --server localhost:8001
+# 5. Remote CPU Triton Inference Server via HTTP
+.venv/bin/python python/src/main.py --source video/intersection-night.mp4 --protocol http --server 192.168.1.80:8000 --cpu
+
+# 6. Synchronous Per-Frame Latency Benchmark (Headless)
+.venv/bin/python python/src/main.py --source video/intersection-night.mp4 --headless --max-frames 100 --gpu
 ```
 
 ### Rust Inference Engine
-The Rust engine provides high-throughput, low-memory inference across HTTP v2 and gRPC protocols with native OpenCV C++ bindings:
+The Rust engine provides high-throughput, low-memory inference across HTTP v2 and gRPC protocols with native OpenCV C++ bindings, supporting optional GPU routing:
 
 ```bash
-# Interactive GUI mode with bounding boxes
-rust/target/release/cv-infer-rust --source video/intersection-night.mp4 --protocol grpc
+# Interactive GUI mode with remote GPU Triton
+rust/target/release/cv-infer-rust --source video/intersection-night.mp4 --protocol grpc --server 192.168.1.80:8001 --gpu
 
-# Headless benchmark mode
-rust/target/release/cv-infer-rust --source video/intersection-night.mp4 --protocol http --headless --max-frames 100
+# Headless benchmark mode against remote CPU Triton
+rust/target/release/cv-infer-rust --source video/intersection-night.mp4 --protocol http --server 192.168.1.80:8000 --headless --max-frames 100 --cpu
 ```
 
 ---

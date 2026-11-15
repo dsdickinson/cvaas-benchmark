@@ -47,6 +47,9 @@ def parse_args():
     parser.add_argument("--all-classes", action="store_true", help="Detect all 80 COCO classes instead of filtering to traffic only")
     parser.add_argument("--sync", action="store_true", help="Run in blocking synchronous mode instead of smooth async display")
     parser.add_argument("--no-track", action="store_true", help="Disable buffered interpolation (display static keyframe detections)")
+    parser.add_argument("--device", choices=["auto", "cpu", "cuda", "mps"], default="auto", help="Execution device for local inference (default: auto)")
+    parser.add_argument("--gpu", action="store_true", help="Enable/force GPU processing (CUDA or MPS if available)")
+    parser.add_argument("--cpu", action="store_true", help="Force CPU-only execution (disables GPU)")
     return parser.parse_args()
 
 
@@ -307,6 +310,11 @@ def run_sync_pipeline(args, cap, triton, labels, mqtt, window_name):
 def main():
     args = parse_args()
 
+    if args.cpu:
+        args.device = "cpu"
+    elif args.gpu and args.device == "cpu":
+        args.device = "auto"
+
     if args.server is None:
         args.server = "localhost:8000" if args.protocol == "http" else "localhost:8001"
 
@@ -315,6 +323,7 @@ def main():
     print(f"Protocol:     {args.protocol.upper()} -> {args.server}")
     print(f"Model:        {args.model}")
     print(f"Model Size:   {args.model_size}")
+    print(f"Device Opt:   {args.device.upper()} (GPU flag: {args.gpu})")
     print(f"Headless:     {args.headless}")
     print(f"Mode:         {'Headless Benchmark' if args.headless else ('Sync Blocking' if args.sync else 'Smooth Async 30FPS')}")
     print(f"Max Frames:   {args.max_frames if args.max_frames > 0 else 'Unlimited'}")
@@ -335,6 +344,8 @@ def main():
         enhance_night=(not args.no_enhance),
         traffic_only=(not args.all_classes),
         model_size=args.model_size,
+        device=args.device,
+        gpu=args.gpu,
     )
 
     # Initialize MQTT if requested

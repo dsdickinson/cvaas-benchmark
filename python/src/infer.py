@@ -51,6 +51,8 @@ class TritonInferenceClient:
         enhance_night: bool = True,
         traffic_only: bool = True,
         model_size: str = "small",
+        device: str = "auto",
+        gpu: bool = False,
     ):
         self.server_url = server_url
         self.protocol = protocol.lower()
@@ -63,6 +65,9 @@ class TritonInferenceClient:
         self.enhance_night = enhance_night
         self.traffic_only = traffic_only
         self.model_size = model_size.lower()
+        self.device = device.lower()
+        self.gpu = gpu
+        self.resolved_device = self._resolve_device()
         self.client = None
         self.local_model = None
 
@@ -72,6 +77,37 @@ class TritonInferenceClient:
         # If Triton was not reachable or local mode was requested, initialize local detector
         if (self.mock_mode or self.local_mode) and LOCAL_YOLO_AVAILABLE:
             self._init_local_detector()
+
+    def _resolve_device(self) -> str:
+        req = self.device
+        if self.gpu and req == "cpu":
+            req = "auto"
+
+        try:
+            import torch
+            cuda_avail = torch.cuda.is_available()
+            mps_avail = hasattr(torch.backends, "mps") and torch.backends.mps.is_available()
+        except ImportError:
+            return "cpu"
+
+        if req in ["auto", "gpu"]:
+            if cuda_avail:
+                return "cuda"
+            elif mps_avail:
+                return "mps"
+            return "cpu"
+        elif req == "cuda":
+            if cuda_avail:
+                return "cuda"
+            print("Notice: CUDA GPU requested but not available. Falling back to CPU.")
+            return "cpu"
+        elif req == "mps":
+            if mps_avail:
+                return "mps"
+            print("Notice: Apple Silicon MPS requested but not available. Falling back to CPU.")
+            return "cpu"
+        else:
+            return "cpu"
 
     def _init_local_detector(self):
         models_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "models"))
@@ -92,9 +128,10 @@ class TritonInferenceClient:
 
         if chosen_path:
             try:
-                print(f"Loading high-accuracy local model: {os.path.basename(chosen_path)} (imgsz={self.imgsz})...")
+                device_label = self.resolved_device.upper()
+                print(f"Loading high-accuracy local model: {os.path.basename(chosen_path)} (imgsz={self.imgsz}, device={device_label})...")
                 self.local_model = YOLO(chosen_path)
-                print(f"Local detector loaded. Night enhancement: {self.enhance_night} | Traffic filter: {self.traffic_only}")
+                print(f"Local detector loaded. Device: {device_label} | Night enhancement: {self.enhance_night} | Traffic filter: {self.traffic_only}")
                 self.local_mode = True
                 self.mock_mode = False
             except Exception as e:
@@ -125,6 +162,29 @@ class TritonInferenceClient:
             print(f"Notice: Connection to Triton ({self.protocol}://{self.server_url}) failed: {e}.")
             print("Falling back to real-time local model detection.")
             self.local_mode = True
+
+        if not self.local_mode and self.client is not None:
+            self._inspect_remote_backend()
+
+    def _inspect_remote_backend(self):
+        try:
+            device_target = "GPU" if (self.gpu or self.device in ["cuda", "gpu"]) else ("CPU" if self.device == "cpu" else "AUTO")
+            print(f"Connected to remote Triton Inference Server ({self.protocol.upper()} -> {self.server_url}).")
+            
+            if self.protocol == "http":
+                config = self.client.get_model_config(self.model_name)
+                groups = config.get("instance_group", [])
+                backend = groups[0].get("kind", "KIND_GPU") if groups else "KIND_GPU"
+            else:
+                config_resp = self.client.get_model_config(self.model_name)
+                groups = config_resp.config.instance_group
+                backend = "KIND_GPU" if any("GPU" in str(g.kind) for g in groups) else "KIND_CPU"
+
+            backend_label = "Remote GPU (CUDA/TensorRT)" if "GPU" in backend else "Remote CPU"
+            print(f"Remote Model: '{self.model_name}' | Server Backend: {backend_label} | Client Preference: {device_target}")
+        except Exception:
+            target_label = "GPU" if (self.gpu or self.device != "cpu") else "CPU"
+            print(f"Connected to remote Triton ({self.protocol.upper()} -> {self.server_url}). Target execution: {target_label}.")
 
     def infer(self, image_np: np.ndarray, labels_dict: Optional[Dict[int, str]] = None) -> Tuple[np.ndarray, np.ndarray, np.ndarray, int, float]:
         """
@@ -157,6 +217,7 @@ class TritonInferenceClient:
                 imgsz=self.imgsz,
                 conf=self.conf_thresh,
                 classes=target_classes,
+                device=self.resolved_device,
                 verbose=False,
             )
             t_infer = time.perf_counter() - t_start

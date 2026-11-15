@@ -63,6 +63,18 @@ struct Args {
     /// Force mock inference mode
     #[arg(long, default_value_t = false)]
     mock: bool,
+
+    /// Optional execution device: auto, cpu, or cuda
+    #[arg(long, default_value = "auto")]
+    device: String,
+
+    /// Enable GPU processing
+    #[arg(long, default_value_t = false)]
+    gpu: bool,
+
+    /// Force CPU processing
+    #[arg(long, default_value_t = false)]
+    cpu: bool,
 }
 
 #[derive(Serialize)]
@@ -142,6 +154,7 @@ async fn main() -> Result<()> {
     println!("Source:       {}", args.source);
     println!("Protocol:     {} -> {}", protocol.to_uppercase(), server_url);
     println!("Model:        {}", args.model);
+    println!("Device:       {}", if args.cpu { "CPU" } else if args.gpu { "GPU (CUDA)" } else { "AUTO" });
     println!("Resolution:   {}x{}", args.width, args.height);
     println!("Headless:     {}", args.headless);
     println!(

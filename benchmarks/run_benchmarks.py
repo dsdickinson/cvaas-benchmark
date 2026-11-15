@@ -27,6 +27,9 @@ def parse_args():
     parser.add_argument("--output-dir", default="benchmarks/results", help="Directory to save benchmark metrics")
     parser.add_argument("--mock", action="store_true", help="Run with mock inference for standalone testing")
     parser.add_argument("--server", default=None, help="Triton server host:port")
+    parser.add_argument("--device", choices=["auto", "cpu", "cuda", "mps"], default="auto", help="Execution device (default: auto)")
+    parser.add_argument("--gpu", action="store_true", help="Enable GPU processing")
+    parser.add_argument("--cpu", action="store_true", help="Force CPU-only execution")
     return parser.parse_args()
 
 
@@ -58,6 +61,12 @@ def run_single_benchmark(engine: str, protocol: str, args, out_json: str):
             cmd.append("--mock")
         if args.server:
             cmd.extend(["--server", args.server])
+        if args.cpu:
+            cmd.append("--cpu")
+        elif args.gpu:
+            cmd.append("--gpu")
+        elif args.device != "auto":
+            cmd.extend(["--device", args.device])
 
     elif engine == "rust":
         rust_bin = get_rust_binary()
@@ -76,6 +85,12 @@ def run_single_benchmark(engine: str, protocol: str, args, out_json: str):
             cmd.append("--mock")
         if args.server:
             cmd.extend(["--server", args.server])
+        if args.cpu:
+            cmd.append("--cpu")
+        elif args.gpu:
+            cmd.append("--gpu")
+        elif args.device != "auto":
+            cmd.extend(["--device", args.device])
     else:
         raise ValueError(f"Unknown engine: {engine}")
 
