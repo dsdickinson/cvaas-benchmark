@@ -86,28 +86,25 @@ class TritonInferenceClient:
         try:
             import torch
             cuda_avail = torch.cuda.is_available()
-            mps_avail = hasattr(torch.backends, "mps") and torch.backends.mps.is_available()
         except ImportError:
             return "cpu"
 
-        if req in ["auto", "gpu"]:
-            if cuda_avail:
-                return "cuda"
-            elif mps_avail:
-                return "mps"
+        # If NVIDIA CUDA GPU is available (e.g. Linux workstation, Cloud GPU, Jetson)
+        if cuda_avail and req in ["auto", "gpu", "cuda"]:
+            return "cuda"
+
+        if req == "cuda":
+            print("Notice: CUDA GPU requested but not available. Falling back to multi-core CPU.")
             return "cpu"
-        elif req == "cuda":
-            if cuda_avail:
-                return "cuda"
-            print("Notice: CUDA GPU requested but not available. Falling back to CPU.")
+
+        if req == "mps":
+            # PyTorch MPS backend on macOS has an upstream Apple Metal convolution bug:
+            # '-[MPSNDArray arrayViewWithShape:strides:]: unrecognized selector'.
+            print("Notice: PyTorch MPS on macOS triggers an upstream Metal convolution bug (-[MPSNDArray arrayViewWithShape:strides:]). Falling back to multi-core CPU.")
             return "cpu"
-        elif req == "mps":
-            if mps_avail:
-                return "mps"
-            print("Notice: Apple Silicon MPS requested but not available. Falling back to CPU.")
-            return "cpu"
-        else:
-            return "cpu"
+
+        # Default safely to high-throughput multi-core CPU for local execution
+        return "cpu"
 
     def _init_local_detector(self):
         models_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "models"))
