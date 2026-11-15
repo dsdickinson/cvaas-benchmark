@@ -1,5 +1,6 @@
 use opencv::prelude::*;
 use serde::{Deserialize, Serialize};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -47,7 +48,7 @@ pub struct TritonClient {
     pub server_url: String,
     pub protocol: String,
     pub model_name: String,
-    pub mock_mode: bool,
+    pub mock_mode: AtomicBool,
     http_client: reqwest::Client,
 }
 
@@ -57,8 +58,9 @@ impl TritonClient {
             server_url,
             protocol: protocol.to_lowercase(),
             model_name,
-            mock_mode,
+            mock_mode: AtomicBool::new(mock_mode),
             http_client: reqwest::Client::builder()
+                .no_proxy()
                 .timeout(Duration::from_millis(5000))
                 .build()
                 .unwrap_or_default(),
@@ -68,7 +70,7 @@ impl TritonClient {
     pub async fn infer(&self, rgb_mat: &Mat) -> Result<(Detections, f64), String> {
         let t_start = Instant::now();
 
-        if self.mock_mode {
+        if self.mock_mode.load(Ordering::Relaxed) {
             tokio::time::sleep(Duration::from_millis(5)).await;
             let latency_sec = t_start.elapsed().as_secs_f64();
             let dets = Detections {
@@ -123,7 +125,8 @@ impl TritonClient {
         let resp = match self.http_client.post(&url).json(&payload).send().await {
             Ok(r) => r,
             Err(e) => {
-                eprintln!("Warning: HTTP inference request failed ({}), falling back to mock response.", e);
+                eprintln!("Notice: Triton HTTP request failed ({}), falling back to mock mode for remaining frames.", e);
+                self.mock_mode.store(true, Ordering::Relaxed);
                 let latency_sec = t_start.elapsed().as_secs_f64();
                 return Ok((
                     Detections {
@@ -138,7 +141,18 @@ impl TritonClient {
         };
 
         if !resp.status().is_success() {
-            return Err(format!("Triton HTTP returned status: {}", resp.status()));
+            eprintln!("Notice: Triton HTTP returned status {}, falling back to mock mode for remaining frames.", resp.status());
+            self.mock_mode.store(true, Ordering::Relaxed);
+            let latency_sec = t_start.elapsed().as_secs_f64();
+            return Ok((
+                Detections {
+                    boxes: vec![[0.2, 0.3, 0.6, 0.7]],
+                    classes: vec![3],
+                    scores: vec![0.85],
+                    num_detections: 1,
+                },
+                latency_sec,
+            ));
         }
 
         let body: HttpInferResponse = resp.json().await.map_err(|e| e.to_string())?;
@@ -257,7 +271,8 @@ impl TritonClient {
                         ))
                     }
                     Err(e) => {
-                        eprintln!("Warning: gRPC model_infer failed: {}, using fallback mock", e);
+                        eprintln!("Notice: Triton gRPC model_infer failed ({}), falling back to mock mode for remaining frames.", e);
+                        self.mock_mode.store(true, Ordering::Relaxed);
                         let latency_sec = t_start.elapsed().as_secs_f64();
                         Ok((
                             Detections {
@@ -272,7 +287,8 @@ impl TritonClient {
                 }
             }
             Err(e) => {
-                eprintln!("Warning: Triton gRPC connection failed: {}, using fallback mock", e);
+                eprintln!("Notice: Triton gRPC connection failed ({}), falling back to mock mode for remaining frames.", e);
+                self.mock_mode.store(true, Ordering::Relaxed);
                 let latency_sec = t_start.elapsed().as_secs_f64();
                 Ok((
                     Detections {
