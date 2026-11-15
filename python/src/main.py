@@ -13,13 +13,14 @@ import json
 import argparse
 import threading
 import queue
+from collections import deque
 import numpy as np
 import cv2 as cv
 
 from utils import load_label_map, draw_detections
 from infer import TritonInferenceClient
 from mqtt_client import MqttPublisher
-from tracker import RealtimeMotionTracker
+from tracker import BufferedVideoInterpolator
 
 
 def parse_args():
@@ -45,20 +46,24 @@ def parse_args():
     parser.add_argument("--no-enhance", action="store_true", help="Disable night-time CLAHE contrast enhancement")
     parser.add_argument("--all-classes", action="store_true", help="Detect all 80 COCO classes instead of filtering to traffic only")
     parser.add_argument("--sync", action="store_true", help="Run in blocking synchronous mode instead of smooth async display")
-    parser.add_argument("--no-track", action="store_true", help="Disable velocity motion tracking (keep static boxes between updates)")
+    parser.add_argument("--no-track", action="store_true", help="Disable buffered interpolation (display static keyframe detections)")
     return parser.parse_args()
 
 
 def run_async_display(args, cap, triton, labels, mqtt, window_name):
     """
-    Decoupled Asynchronous Display Loop.
+    Decoupled Asynchronous Display Loop with Buffered Keyframe Interpolation.
     Plays video smoothly at native frame rate (30 FPS) while running
     inference in a background worker thread.
+    Uses buffered interpolation to ensure:
+    - Zero trailing: Detections are anchored on future and past keyframes.
+    - Zero wandering: No forward extrapolation; boxes are strictly bounded between real YOLO detections.
+    - Butter-smooth 30 FPS playback with ~180ms buffer.
     """
     cap_fps = cap.get(cv.CAP_PROP_FPS) or 30.0
     frame_interval = 1.0 / cap_fps
 
-    tracker = RealtimeMotionTracker() if not args.no_track else None
+    interpolator = BufferedVideoInterpolator() if not args.no_track else None
     lock = threading.Lock()
     shared_state = {
         "boxes": np.zeros((0, 4), dtype=np.float32),
@@ -67,7 +72,7 @@ def run_async_display(args, cap, triton, labels, mqtt, window_name):
         "num_dets": 0,
     }
 
-    current_frame_idx = [0]
+    display_buffer = deque()
     infer_queue = queue.Queue(maxsize=1)
     stop_event = threading.Event()
 
@@ -80,9 +85,8 @@ def run_async_display(args, cap, triton, labels, mqtt, window_name):
 
             boxes, classes, scores, num_dets, _ = triton.infer(frame_rgb, labels)
             with lock:
-                curr_f = current_frame_idx[0]
-                if tracker is not None:
-                    tracker.update_detections(boxes, classes, scores, sent_frame_id, curr_f)
+                if interpolator is not None:
+                    interpolator.add_keyframe(sent_frame_id, boxes, classes, scores)
                 else:
                     shared_state["boxes"] = boxes
                     shared_state["classes"] = classes
@@ -93,37 +97,61 @@ def run_async_display(args, cap, triton, labels, mqtt, window_name):
     worker_thread = threading.Thread(target=worker_loop, daemon=True)
     worker_thread.start()
 
-    frame_count = 0
+    # Pre-buffer initial frames (~6 frames / ~200ms)
+    initial_buffer_size = 6
+    read_frame_idx = 0
+    for _ in range(initial_buffer_size):
+        ret, frame = cap.read()
+        if not ret or frame is None:
+            break
+        display_buffer.append((read_frame_idx, frame))
+        if read_frame_idx == 0:
+            rgb_init = cv.cvtColor(frame, cv.COLOR_BGR2RGB)
+            infer_queue.put((0, rgb_init))
+        read_frame_idx += 1
+
+    # Wait for the initial keyframe
+    if not infer_queue.empty():
+        infer_queue.join()
+
+    displayed_count = 0
     t_start = time.perf_counter()
 
-    mode_label = "Velocity Motion-Tracking" if not args.no_track else "Static Overlay"
+    mode_label = "Buffered Keyframe Interpolation" if not args.no_track else "Static Keyframes"
     print(f"Smooth Async Display running at native ~{cap_fps:.1f} FPS with {mode_label} (press 'q' to quit)...")
 
     try:
         while True:
-            if args.max_frames > 0 and frame_count >= args.max_frames:
+            if args.max_frames > 0 and displayed_count >= args.max_frames:
                 break
 
             t_frame_start = time.perf_counter()
-            ret, frame = cap.read()
-            if not ret or frame is None:
-                print("End of video stream reached.")
+
+            # Maintain buffer depth of ~6-8 frames by reading ahead
+            if len(display_buffer) < 10:
+                ret, frame = cap.read()
+                if ret and frame is not None:
+                    display_buffer.append((read_frame_idx, frame))
+                    if infer_queue.empty():
+                        rgb_frame = cv.cvtColor(frame, cv.COLOR_BGR2RGB)
+                        try:
+                            infer_queue.put_nowait((read_frame_idx, rgb_frame))
+                        except queue.Full:
+                            pass
+                    read_frame_idx += 1
+                elif len(display_buffer) == 0:
+                    print("End of video stream reached.")
+                    break
+
+            if not display_buffer:
                 break
 
-            current_frame_idx[0] = frame_count
+            disp_idx, disp_frame = display_buffer.popleft()
 
-            # Dispatch frame to background worker if idle
-            if infer_queue.empty():
-                rgb_frame = cv.cvtColor(frame, cv.COLOR_BGR2RGB)
-                try:
-                    infer_queue.put_nowait((frame_count, rgb_frame))
-                except queue.Full:
-                    pass
-
-            # Retrieve current detections (motion-compensated to current frame!)
+            # Retrieve interpolated detections for this exact frame
             with lock:
-                if tracker is not None:
-                    cur_boxes, cur_classes, cur_scores, cur_dets = tracker.step()
+                if interpolator is not None:
+                    cur_boxes, cur_classes, cur_scores, cur_dets = interpolator.get_interpolated_detections(disp_idx)
                 else:
                     cur_boxes = shared_state["boxes"]
                     cur_classes = shared_state["classes"]
@@ -131,7 +159,7 @@ def run_async_display(args, cap, triton, labels, mqtt, window_name):
                     cur_dets = shared_state["num_dets"]
 
             # Render overlay
-            annotated = draw_detections(frame, cur_boxes, cur_classes, cur_scores, labels, min_score_thresh=args.conf)
+            annotated = draw_detections(disp_frame, cur_boxes, cur_classes, cur_scores, labels, min_score_thresh=args.conf)
 
             # Display real-time video FPS counter on screen
             fps_text = f"Native Video: {cap_fps:.1f} FPS | Detections: {cur_dets}"
@@ -147,7 +175,7 @@ def run_async_display(args, cap, triton, labels, mqtt, window_name):
                     timestamp=time.time(),
                 )
 
-            frame_count += 1
+            displayed_count += 1
 
             # Precise clock pacing for smooth 30 FPS
             elapsed = time.perf_counter() - t_frame_start
@@ -159,7 +187,7 @@ def run_async_display(args, cap, triton, labels, mqtt, window_name):
     finally:
         stop_event.set()
         total_time = time.perf_counter() - t_start
-        print(f"\nPlayback ended. Displayed {frame_count} frames in {total_time:.2f}s ({frame_count/max(total_time,0.001):.1f} FPS).")
+        print(f"\nPlayback ended. Displayed {displayed_count} frames in {total_time:.2f}s ({displayed_count/max(total_time,0.001):.1f} FPS).")
 
 
 def run_sync_pipeline(args, cap, triton, labels, mqtt, window_name):

@@ -77,7 +77,7 @@ python python/src/main.py [OPTIONS]
 - `--local`: Run real-time local object detection model (`models/yolov8m.pt`) without needing a remote Triton server
 - `--model-size`: Local model capacity (`medium` for max accuracy, `small` for higher FPS, or `nano`)
 - `--sync`: Run in blocking synchronous mode instead of smooth native 30 FPS async playback
-- `--no-track`: Disable velocity motion extrapolation (keep static boxes between inference updates)
+- `--no-track`: Disable buffered keyframe interpolation (display static keyframe detections)
 - `--conf`: Confidence score threshold for detections (default: `0.15`)
 - `--imgsz`: Input image resolution for local detector (default: `1280`, preserves detail on 1080p aerial traffic)
 - `--no-enhance`: Disable night-time CLAHE contrast enhancement
