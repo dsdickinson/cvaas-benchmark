@@ -12,5 +12,10 @@ rust/compat_lib/
 benchmarks/results/*.json
 benchmarks/results/*.csv
 
+# Models & Heavy Assets
+models/*.pt
+models/*.onnx
+video/intersection-4791734-hd_1920_1080_30fps.mp4
+
 # System
 .DS_Store

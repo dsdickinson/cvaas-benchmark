@@ -62,6 +62,7 @@ cvaas-benchmarks/
 │   └── src/
 │       ├── main.py                  # CLI entrypoint for ingestion and execution
 │       ├── infer.py                 # Triton HTTP and gRPC inference client
+│       ├── tracker.py               # Centroid velocity motion extrapolation tracker
 │       ├── utils.py                 # Label parsing and OpenCV bounding box rendering
 │       └── mqtt_client.py           # Telemetry and base64 frame publisher
 │

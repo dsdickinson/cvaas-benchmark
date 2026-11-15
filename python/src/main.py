@@ -3,6 +3,7 @@
 Python Computer Vision Traffic Inference Pipeline.
 Supports video stream/file ingestion, Triton HTTP/gRPC inference,
 detection visualization, MQTT telemetry, and headless benchmarking.
+Features decoupled asynchronous display loop for smooth 30 FPS playback.
 """
 
 import os
@@ -10,12 +11,15 @@ import sys
 import time
 import json
 import argparse
+import threading
+import queue
 import numpy as np
 import cv2 as cv
 
 from utils import load_label_map, draw_detections
 from infer import TritonInferenceClient
 from mqtt_client import MqttPublisher
+from tracker import RealtimeMotionTracker
 
 
 def parse_args():
@@ -34,54 +38,135 @@ def parse_args():
     parser.add_argument("--mqtt-port", type=int, default=1883, help="MQTT broker port")
     parser.add_argument("--metrics-out", default=None, help="Path to save benchmark metrics JSON")
     parser.add_argument("--mock", action="store_true", help="Force mock inference without remote Triton server")
+    parser.add_argument("--local", action="store_true", help="Force local real-time YOLO model instead of remote Triton")
+    parser.add_argument("--model-size", choices=["nano", "small", "medium"], default="medium", help="Model size for local detection (default: medium)")
+    parser.add_argument("--conf", type=float, default=0.15, help="Confidence threshold for detections (default: 0.15)")
+    parser.add_argument("--imgsz", type=int, default=1280, help="Inference image size for local detector (default: 1280)")
+    parser.add_argument("--no-enhance", action="store_true", help="Disable night-time CLAHE contrast enhancement")
+    parser.add_argument("--all-classes", action="store_true", help="Detect all 80 COCO classes instead of filtering to traffic only")
+    parser.add_argument("--sync", action="store_true", help="Run in blocking synchronous mode instead of smooth async display")
+    parser.add_argument("--no-track", action="store_true", help="Disable velocity motion tracking (keep static boxes between updates)")
     return parser.parse_args()
 
 
-def main():
-    args = parse_args()
+def run_async_display(args, cap, triton, labels, mqtt, window_name):
+    """
+    Decoupled Asynchronous Display Loop.
+    Plays video smoothly at native frame rate (30 FPS) while running
+    inference in a background worker thread.
+    """
+    cap_fps = cap.get(cv.CAP_PROP_FPS) or 30.0
+    frame_interval = 1.0 / cap_fps
 
-    # Determine default server port if not specified
-    if args.server is None:
-        args.server = "localhost:8000" if args.protocol == "http" else "localhost:8001"
+    tracker = RealtimeMotionTracker() if not args.no_track else None
+    lock = threading.Lock()
+    shared_state = {
+        "boxes": np.zeros((0, 4), dtype=np.float32),
+        "classes": np.zeros((0,), dtype=np.int32),
+        "scores": np.zeros((0,), dtype=np.float32),
+        "num_dets": 0,
+    }
 
-    print("=== CVaaS Python Inference Pipeline ===")
-    print(f"Source:       {args.source}")
-    print(f"Protocol:     {args.protocol.upper()} -> {args.server}")
-    print(f"Model:        {args.model}")
-    print(f"Resolution:   {args.width}x{args.height}")
-    print(f"Headless:     {args.headless}")
-    print(f"Max Frames:   {args.max_frames if args.max_frames > 0 else 'Unlimited'}")
-    print("========================================")
+    current_frame_idx = [0]
+    infer_queue = queue.Queue(maxsize=1)
+    stop_event = threading.Event()
 
-    # Load labels
-    labels = load_label_map(args.labels)
+    def worker_loop():
+        while not stop_event.is_set():
+            try:
+                sent_frame_id, frame_rgb = infer_queue.get(timeout=0.05)
+            except queue.Empty:
+                continue
 
-    # Initialize Triton client
-    triton = TritonInferenceClient(
-        server_url=args.server,
-        protocol=args.protocol,
-        model_name=args.model,
-        mock_mode=args.mock,
-    )
+            boxes, classes, scores, num_dets, _ = triton.infer(frame_rgb, labels)
+            with lock:
+                curr_f = current_frame_idx[0]
+                if tracker is not None:
+                    tracker.update_detections(boxes, classes, scores, sent_frame_id, curr_f)
+                else:
+                    shared_state["boxes"] = boxes
+                    shared_state["classes"] = classes
+                    shared_state["scores"] = scores
+                    shared_state["num_dets"] = num_dets
+            infer_queue.task_done()
 
-    # Initialize MQTT if requested
-    mqtt = MqttPublisher(
-        broker=args.mqtt_broker,
-        port=args.mqtt_port,
-        enabled=args.mqtt_enabled,
-    )
+    worker_thread = threading.Thread(target=worker_loop, daemon=True)
+    worker_thread.start()
 
-    # Open video capture
-    cap = cv.VideoCapture(args.source)
-    if not cap.isOpened():
-        print(f"Error: Unable to open video source: {args.source}")
-        sys.exit(1)
+    frame_count = 0
+    t_start = time.perf_counter()
 
-    window_name = f"CVaaS Python: {args.source}"
-    if not args.headless:
-        cv.namedWindow(window_name, cv.WINDOW_NORMAL)
-        cv.resizeWindow(window_name, 960, 540)
+    mode_label = "Velocity Motion-Tracking" if not args.no_track else "Static Overlay"
+    print(f"Smooth Async Display running at native ~{cap_fps:.1f} FPS with {mode_label} (press 'q' to quit)...")
 
+    try:
+        while True:
+            if args.max_frames > 0 and frame_count >= args.max_frames:
+                break
+
+            t_frame_start = time.perf_counter()
+            ret, frame = cap.read()
+            if not ret or frame is None:
+                print("End of video stream reached.")
+                break
+
+            current_frame_idx[0] = frame_count
+
+            # Dispatch frame to background worker if idle
+            if infer_queue.empty():
+                rgb_frame = cv.cvtColor(frame, cv.COLOR_BGR2RGB)
+                try:
+                    infer_queue.put_nowait((frame_count, rgb_frame))
+                except queue.Full:
+                    pass
+
+            # Retrieve current detections (motion-compensated to current frame!)
+            with lock:
+                if tracker is not None:
+                    cur_boxes, cur_classes, cur_scores, cur_dets = tracker.step()
+                else:
+                    cur_boxes = shared_state["boxes"]
+                    cur_classes = shared_state["classes"]
+                    cur_scores = shared_state["scores"]
+                    cur_dets = shared_state["num_dets"]
+
+            # Render overlay
+            annotated = draw_detections(frame, cur_boxes, cur_classes, cur_scores, labels, min_score_thresh=args.conf)
+
+            # Display real-time video FPS counter on screen
+            fps_text = f"Native Video: {cap_fps:.1f} FPS | Detections: {cur_dets}"
+            cv.putText(annotated, fps_text, (20, 35), cv.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2, cv.LINE_AA)
+            cv.imshow(window_name, annotated)
+
+            if args.mqtt_enabled and cur_dets > 0:
+                mqtt.publish_detections(
+                    stream_id=os.path.basename(args.source),
+                    boxes=cur_boxes.tolist(),
+                    classes=cur_classes.tolist(),
+                    scores=cur_scores.tolist(),
+                    timestamp=time.time(),
+                )
+
+            frame_count += 1
+
+            # Precise clock pacing for smooth 30 FPS
+            elapsed = time.perf_counter() - t_frame_start
+            sleep_ms = max(int((frame_interval - elapsed) * 1000), 1)
+            key = cv.waitKey(sleep_ms) & 0xFF
+            if key == ord("q") or key == 27:
+                break
+
+    finally:
+        stop_event.set()
+        total_time = time.perf_counter() - t_start
+        print(f"\nPlayback ended. Displayed {frame_count} frames in {total_time:.2f}s ({frame_count/max(total_time,0.001):.1f} FPS).")
+
+
+def run_sync_pipeline(args, cap, triton, labels, mqtt, window_name):
+    """
+    Synchronous Blocking Loop.
+    Evaluates each frame sequentially (used for exact per-frame latency benchmarking).
+    """
     frame_count = 0
     metrics_records = []
     overall_start_time = time.perf_counter()
@@ -102,17 +187,16 @@ def main():
 
             # 2. Preprocess Frame
             resized = cv.resize(frame, (args.width, args.height))
-            # Convert BGR to RGB for model tensor
             rgb_frame = cv.cvtColor(resized, cv.COLOR_BGR2RGB)
             t_prep = time.perf_counter()
 
             # 3. Inference
-            boxes, classes, scores, num_dets, t_infer = triton.infer(rgb_frame)
+            boxes, classes, scores, num_dets, t_infer = triton.infer(rgb_frame, labels)
             t_inf_end = time.perf_counter()
 
             # 4. Postprocess / Visualization
             if not args.headless:
-                annotated = draw_detections(frame, boxes, classes, scores, labels)
+                annotated = draw_detections(frame, boxes, classes, scores, labels, min_score_thresh=args.conf)
                 cv.imshow(window_name, annotated)
                 if cv.waitKey(1) & 0xFF == ord("q"):
                     break
@@ -150,10 +234,6 @@ def main():
 
     finally:
         total_elapsed = time.perf_counter() - overall_start_time
-        cap.release()
-        if not args.headless:
-            cv.destroyAllWindows()
-        mqtt.stop()
 
     if frame_count > 0:
         totals = [m["total_ms"] for m in metrics_records]
@@ -194,6 +274,71 @@ def main():
             with open(args.metrics_out, "w") as f:
                 json.dump({"summary": summary, "per_frame": metrics_records}, f, indent=2)
             print(f"Metrics saved to {args.metrics_out}")
+
+
+def main():
+    args = parse_args()
+
+    if args.server is None:
+        args.server = "localhost:8000" if args.protocol == "http" else "localhost:8001"
+
+    print("=== CVaaS Python Inference Pipeline ===")
+    print(f"Source:       {args.source}")
+    print(f"Protocol:     {args.protocol.upper()} -> {args.server}")
+    print(f"Model:        {args.model}")
+    print(f"Model Size:   {args.model_size}")
+    print(f"Headless:     {args.headless}")
+    print(f"Mode:         {'Headless Benchmark' if args.headless else ('Sync Blocking' if args.sync else 'Smooth Async 30FPS')}")
+    print(f"Max Frames:   {args.max_frames if args.max_frames > 0 else 'Unlimited'}")
+    print("========================================")
+
+    # Load labels
+    labels = load_label_map(args.labels)
+
+    # Initialize Triton client
+    triton = TritonInferenceClient(
+        server_url=args.server,
+        protocol=args.protocol,
+        model_name=args.model,
+        mock_mode=args.mock,
+        local_mode=args.local,
+        conf_thresh=args.conf,
+        imgsz=args.imgsz,
+        enhance_night=(not args.no_enhance),
+        traffic_only=(not args.all_classes),
+        model_size=args.model_size,
+    )
+
+    # Initialize MQTT if requested
+    mqtt = MqttPublisher(
+        broker=args.mqtt_broker,
+        port=args.mqtt_port,
+        enabled=args.mqtt_enabled,
+    )
+
+    # Open video capture
+    cap = cv.VideoCapture(args.source)
+    if not cap.isOpened():
+        print(f"Error: Unable to open video source: {args.source}")
+        sys.exit(1)
+
+    window_name = f"CVaaS Python: {args.source}"
+    if not args.headless:
+        cv.namedWindow(window_name, cv.WINDOW_NORMAL)
+        cv.resizeWindow(window_name, 960, 540)
+
+    try:
+        if not args.headless and not args.sync:
+            # Smooth decoupled async display at native 30 FPS
+            run_async_display(args, cap, triton, labels, mqtt, window_name)
+        else:
+            # Synchronous per-frame benchmark loop
+            run_sync_pipeline(args, cap, triton, labels, mqtt, window_name)
+    finally:
+        cap.release()
+        if not args.headless:
+            cv.destroyAllWindows()
+        mqtt.stop()
 
 
 if __name__ == "__main__":

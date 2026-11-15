@@ -74,9 +74,14 @@ python python/src/main.py [OPTIONS]
 - `--protocol`, `-p`: `http` or `grpc` (default: `http`)
 - `--server`: Triton server address (`host:port`). Defaults to `localhost:8000` for HTTP or `localhost:8001` for gRPC.
 - `--model`, `-m`: Model name deployed on Triton (default: `object_detection`)
-- `--width`: Input tensor width (default: `1024`)
-- `--height`: Input tensor height (default: `600`)
-- `--labels`: Path to label mapping file (default: `config/labels.txt`)
+- `--local`: Run real-time local object detection model (`models/yolov8m.pt`) without needing a remote Triton server
+- `--model-size`: Local model capacity (`medium` for max accuracy, `small` for higher FPS, or `nano`)
+- `--sync`: Run in blocking synchronous mode instead of smooth native 30 FPS async playback
+- `--no-track`: Disable velocity motion extrapolation (keep static boxes between inference updates)
+- `--conf`: Confidence score threshold for detections (default: `0.15`)
+- `--imgsz`: Input image resolution for local detector (default: `1280`, preserves detail on 1080p aerial traffic)
+- `--no-enhance`: Disable night-time CLAHE contrast enhancement
+- `--all-classes`: Detect all 80 COCO classes instead of filtering strictly to traffic (vehicles/pedestrians)
 - `--headless`: Run without GUI window creation (essential for unbiased benchmarking)
 - `--max-frames`: Limit number of frames processed (`0` for unlimited)
 - `--mqtt-enabled`: Publish detection coordinates to MQTT
