@@ -47,10 +47,10 @@ class TritonInferenceClient:
         mock_mode: bool = False,
         local_mode: bool = False,
         conf_thresh: float = 0.15,
-        imgsz: int = 1280,
+        imgsz: int = 1024,
         enhance_night: bool = True,
         traffic_only: bool = True,
-        model_size: str = "medium",
+        model_size: str = "small",
     ):
         self.server_url = server_url
         self.protocol = protocol.lower()
